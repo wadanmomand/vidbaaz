@@ -3,9 +3,10 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../downloader/downloader_engine.dart';
+import '../downloader/link_classifier.dart';
+import 'fb_browser_screen.dart';
 
 enum _DlState { idle, resolving, downloading, done, error }
 
@@ -23,10 +24,6 @@ class _DownloaderTabState extends State<DownloaderTab> {
   double _progress = 0;
   String _message = '';
 
-  /// The pasted link, kept when it is a Facebook share link so the user
-  /// can open it in the Facebook app and copy the full video link.
-  String? _shareLink;
-
   @override
   void dispose() {
     _controller.dispose();
@@ -41,6 +38,17 @@ class _DownloaderTabState extends State<DownloaderTab> {
     }
   }
 
+  Future<void> _openInBrowser(String url) async {
+    setState(() {
+      _state = _DlState.idle;
+      _message = 'Facebook blocked the direct download, so the video '
+          'was opened in the in-app browser.';
+    });
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => FbBrowserScreen(pageUrl: url)),
+    );
+  }
+
   Future<void> _download() async {
     final link = _controller.text.trim();
     if (link.isEmpty) {
@@ -48,6 +56,15 @@ class _DownloaderTabState extends State<DownloaderTab> {
         _state = _DlState.error;
         _message = 'Paste a video link first.';
       });
+      return;
+    }
+    final classified = LinkClassifier().classify(link);
+    // Facebook share links can never be fetched over HTTP (Facebook
+    // answers 400 to non-browsers) — open them in the in-app browser,
+    // where they resolve to the video page like in Chrome.
+    if (classified.kind == LinkKind.facebook &&
+        DownloaderEngine.isFacebookShareLink(classified.url)) {
+      await _openInBrowser(classified.url);
       return;
     }
     setState(() {
@@ -77,13 +94,16 @@ class _DownloaderTabState extends State<DownloaderTab> {
       });
     } on ResolveException catch (e) {
       if (!mounted) return;
+      // Any Facebook failure falls back to the in-app browser — the
+      // video page there usually exposes the file even when HTTP was
+      // blocked.
+      if (classified.kind == LinkKind.facebook) {
+        await _openInBrowser(classified.url);
+        return;
+      }
       setState(() {
         _state = _DlState.error;
         _message = e.message;
-        // Facebook share links can't be resolved by any app — keep the
-        // link so we can offer "Open in Facebook app".
-        _shareLink =
-            e.message.contains('share link') ? _controller.text.trim() : null;
       });
     } catch (_) {
       if (!mounted) return;
@@ -167,22 +187,6 @@ class _DownloaderTabState extends State<DownloaderTab> {
                 style: const TextStyle(height: 1.4),
               ),
             ),
-          if (_shareLink != null && _state == _DlState.error) ...[
-            const SizedBox(height: 12),
-            OutlinedButton.icon(
-              onPressed: () async {
-                final uri = Uri.tryParse(_shareLink!);
-                if (uri != null) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              },
-              icon: const Icon(Icons.open_in_new),
-              label: const Padding(
-                padding: EdgeInsets.symmetric(vertical: 10),
-                child: Text('Open in Facebook app'),
-              ),
-            ),
-          ],
           if (_state == _DlState.done) ...[
             const SizedBox(height: 8),
             TextButton.icon(

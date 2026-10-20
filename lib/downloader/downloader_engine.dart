@@ -24,12 +24,62 @@ class DownloaderEngine {
       'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36';
 
+  static const _desktopUa =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0 Safari/537.36';
+
   final http.Client _client;
   DownloaderEngine({http.Client? client}) : _client = client ?? http.Client();
 
   void dispose() => _client.close();
 
   LinkKind _lastKind = LinkKind.directMedia;
+
+  /// Session cookies captured from resolver page responses, per link kind.
+  ///
+  /// TikTok's CDN (Akamai) rejects the playAddr file request with 403
+  /// unless the cookies the video page set (ttwid, tt_chain_token, …) are
+  /// sent with it — verified live 2026-10-20: same playAddr returned 403
+  /// without cookies and 206 + MP4 bytes with them (issue #13).
+  final Map<LinkKind, Map<String, String>> _sessionCookies = {};
+
+  /// Parses a (possibly combined) `set-cookie` header into name → value.
+  /// Public for tests.
+  static Map<String, String> parseSetCookie(String? header) {
+    final out = <String, String>{};
+    if (header == null || header.isEmpty) return out;
+    // Split only on commas that start a new cookie (`name=` follows) —
+    // Expires dates contain commas that must not split.
+    for (final part
+        in header.split(RegExp(r",\s*(?=[A-Za-z0-9!#$%&'*+\-.^_`|~]+=)"))) {
+      final pair = part.split(';').first.trim();
+      final eq = pair.indexOf('=');
+      if (eq <= 0) continue;
+      out[pair.substring(0, eq).trim()] = pair.substring(eq + 1).trim();
+    }
+    return out;
+  }
+
+  void _captureCookies(LinkKind kind, Map<String, String> headers) {
+    final parsed = parseSetCookie(headers['set-cookie']);
+    if (parsed.isEmpty) return;
+    (_sessionCookies[kind] ??= {}).addAll(parsed);
+  }
+
+  /// Merges cookies obtained outside the engine (e.g. from the in-app
+  /// Facebook browser's cookie store) into the session jar, so file
+  /// requests carry them. Public for the browser screen + tests.
+  void setExternalCookies(LinkKind kind, Map<String, String> cookies) {
+    if (cookies.isEmpty) return;
+    (_sessionCookies[kind] ??= {}).addAll(cookies);
+  }
+
+  /// Facebook app-share links (`/share/r/`, `/share/v/`): Facebook answers
+  /// HTTP 400 to every non-browser client (verified live 2026-10-20), but
+  /// a real browser resolves them to the video page — these must go
+  /// through the in-app browser screen, not HTTP. Public for tests.
+  static bool isFacebookShareLink(String url) =>
+      url.contains('facebook.com/share/');
 
   /// The normalized page URL from the last successful resolve — used to
   /// re-resolve once if a download gets rejected (TikTok play URLs can
@@ -61,28 +111,35 @@ class DownloaderEngine {
   }
 
   Future<String> _resolveFacebook(String pageUrl) async {
-    // Facebook /share/r/ and /share/v/ links are app-share intents: Facebook
-    // returns HTTP 400 for them to any non-logged-in client, so they can
-    // never be resolved by an app. Tell the user how to get a working link.
+    // Facebook /share/r/ and /share/v/ links: Facebook returns HTTP 400
+    // for them to any non-browser client (verified live), so HTTP can
+    // never resolve them. The UI routes these to the in-app browser
+    // instead; this throw is only a backstop.
     if (pageUrl.contains('/share/')) {
       throw ResolveException(
-          'This is a Facebook share link, which Facebook blocks for apps. '
-          'Open it in the Facebook app, open the video, tap Share and copy '
-          'the full video link instead.');
+          'This Facebook link needs the in-app browser to open.');
     }
     // Try the original URL first (follows redirects), then the mobile and
-    // desktop variants — whichever page exposes the MP4 wins.
-    final candidates = <String>[
-      pageUrl,
-      mobileFacebookUrl(pageUrl),
-      pageUrl.replaceFirstMapped(
-        RegExp(r'^(https?://)(www\.|m\.)?'),
-        (m) => '${m.group(1)}www.',
+    // desktop variants — whichever page exposes the MP4 wins. The desktop
+    // variant is fetched with a desktop UA: its page embeds the modern
+    // `playable_url` JSON the extractor reads.
+    final candidates = <(String, String)>[
+      (pageUrl, _ua),
+      (mobileFacebookUrl(pageUrl), _ua),
+      (
+        pageUrl.replaceFirstMapped(
+          RegExp(r'^(https?://)(www\.|m\.)?'),
+          (m) => '${m.group(1)}www.',
+        ),
+        _desktopUa,
       ),
     ];
-    for (final url in candidates.toSet()) {
+    final seen = <String>{};
+    for (final (url, ua) in candidates) {
+      if (!seen.add('$ua|$url')) continue;
       final res = await _client.get(Uri.parse(url),
-          headers: {'User-Agent': _ua}).timeout(const Duration(seconds: 20));
+          headers: {'User-Agent': ua}).timeout(const Duration(seconds: 20));
+      _captureCookies(LinkKind.facebook, res.headers);
       if (res.statusCode != 200) continue;
       final direct = extractMp4FromHtml(res.body);
       if (direct != null) return direct;
@@ -97,6 +154,9 @@ class DownloaderEngine {
   Future<String> _resolveTikTok(String pageUrl) async {
     final res = await _client.get(Uri.parse(pageUrl),
         headers: {'User-Agent': _ua}).timeout(const Duration(seconds: 20));
+    // The page's session cookies MUST accompany the file request or
+    // TikTok's CDN answers 403 (issue #13).
+    _captureCookies(LinkKind.tiktok, res.headers);
     if (res.statusCode != 200) {
       throw ResolveException(
           'Could not open that TikTok link (HTTP ${res.statusCode}).');
@@ -161,11 +221,12 @@ class DownloaderEngine {
 
   /// Extracts the best MP4 URL from page HTML. Public for tests.
   ///
-  /// Prefers `og:video:secure_url`, then `hd_src` (Facebook), then `sd_src`,
-  /// then `og:video`.
+  /// Prefers HD sources. Modern Facebook pages embed the video in JSON as
+  /// `playable_url` / `playable_url_quality_hd` / `browser_native_*_url`;
+  /// older pages use `og:video` meta tags or `hd_src` / `sd_src`.
   static String? extractMp4FromHtml(String html) {
     String unescape(String s) =>
-        s.replaceAll(r'\/', '/').replaceAll('&amp;', '&');
+        _unescapeJsonString(s).replaceAll('&amp;', '&');
 
     final ogSecure = RegExp(
         r'''<meta[^>]+property=["']og:video:secure_url["'][^>]+content=["']([^"']+)''',
@@ -173,10 +234,26 @@ class DownloaderEngine {
     final ogVideo = RegExp(
         r'''<meta[^>]+property=["']og:video["'][^>]+content=["']([^"']+)''',
         caseSensitive: false);
-    final hdSrc = RegExp(r'"hd_src"\s*:\s*"([^"]+)"');
-    final sdSrc = RegExp(r'"sd_src"\s*:\s*"([^"]+)"');
+    final playableHd =
+        RegExp(r'"playable_url_quality_hd"\s*:\s*"((?:[^"\\]|\\.)*)"');
+    final browserHd =
+        RegExp(r'"browser_native_hd_url"\s*:\s*"((?:[^"\\]|\\.)*)"');
+    final hdSrc = RegExp(r'"hd_src"\s*:\s*"((?:[^"\\]|\\.)*)"');
+    final playable = RegExp(r'"playable_url"\s*:\s*"((?:[^"\\]|\\.)*)"');
+    final browserSd =
+        RegExp(r'"browser_native_sd_url"\s*:\s*"((?:[^"\\]|\\.)*)"');
+    final sdSrc = RegExp(r'"sd_src"\s*:\s*"((?:[^"\\]|\\.)*)"');
 
-    for (final re in [ogSecure, hdSrc, ogVideo, sdSrc]) {
+    for (final re in [
+      ogSecure,
+      playableHd,
+      browserHd,
+      hdSrc,
+      playable,
+      browserSd,
+      ogVideo,
+      sdSrc,
+    ]) {
       final m = re.firstMatch(html);
       if (m != null) {
         final url = unescape(m.group(1)!);
@@ -187,7 +264,9 @@ class DownloaderEngine {
   }
 
   /// Headers for the video file request. TikTok's CDN rejects requests
-  /// without the Referer (HTTP 403), so it is always sent for TikTok.
+  /// without the Referer (HTTP 403), so it is always sent for TikTok —
+  /// along with the session cookies captured from the video page, which
+  /// the CDN also requires (issue #13).
   Map<String, String> _fileHeaders() {
     final h = <String, String>{
       'User-Agent': _ua,
@@ -196,6 +275,11 @@ class DownloaderEngine {
     };
     if (_lastKind == LinkKind.tiktok) {
       h['Referer'] = 'https://www.tiktok.com/';
+    }
+    final cookies = _sessionCookies[_lastKind];
+    if (cookies != null && cookies.isNotEmpty) {
+      h['Cookie'] =
+          cookies.entries.map((e) => '${e.key}=${e.value}').join('; ');
     }
     return h;
   }

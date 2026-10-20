@@ -96,13 +96,60 @@ void main() {
   });
 
   group('resolve', () {
-    test('facebook share link gives helpful guidance, no crash', () async {
+    test('facebook share link throws browser-needed error, no crash',
+        () async {
       final engine = DownloaderEngine();
       expect(
         () => engine.resolve('https://facebook.com/share/r/abc123/'),
         throwsA(isA<ResolveException>().having(
-            (e) => e.message, 'message', contains('share link'))),
+            (e) => e.message, 'message', contains('in-app browser'))),
       );
+      engine.dispose();
+    });
+
+    test('isFacebookShareLink detects share urls (issue #15)', () {
+      expect(
+          DownloaderEngine.isFacebookShareLink(
+              'https://www.facebook.com/share/v/1DFn1DD3vL/'),
+          isTrue);
+      expect(
+          DownloaderEngine.isFacebookShareLink(
+              'https://www.facebook.com/share/r/abc/'),
+          isTrue);
+      expect(
+          DownloaderEngine.isFacebookShareLink(
+              'https://www.facebook.com/watch/?v=123'),
+          isFalse);
+      expect(
+          DownloaderEngine.isFacebookShareLink(
+              'https://www.tiktok.com/t/abc/'),
+          isFalse);
+    });
+
+    test('setExternalCookies are sent on the file request', () async {
+      final sent = <http.BaseRequest>[];
+      final client = MockClient((req) async {
+        sent.add(req);
+        if (req.url.host.contains('facebook.com')) {
+          return http.Response(
+              '<meta property="og:video:secure_url" content="https://cdn.example.com/v.mp4">',
+              200);
+        }
+        return http.Response('bytes', 200,
+            headers: {'content-type': 'video/mp4', 'content-length': '5'});
+      });
+      final engine = DownloaderEngine(client: client);
+      engine.setExternalCookies(
+          LinkKind.facebook, {'c_user': '123', 'xs': 'abc'});
+      final direct =
+          await engine.resolve('https://www.facebook.com/watch/?v=1');
+      final dir = await Directory.systemTemp.createTemp('vb');
+      final saved = await engine.download(direct, dir.path);
+      expect(File(saved).existsSync(), isTrue);
+      final fileReq =
+          sent.firstWhere((r) => r.url.host.contains('cdn.example.com'));
+      expect(fileReq.headers['Cookie'], contains('c_user=123'));
+      expect(fileReq.headers['Cookie'], contains('xs=abc'));
       engine.dispose();
     });
 
@@ -159,6 +206,27 @@ void main() {
 
     test('returns null when nothing found', () {
       expect(DownloaderEngine.extractMp4FromHtml('<html>nope</html>'), isNull);
+    });
+
+    test('extracts modern playable_url_quality_hd JSON (issue #14)', () {
+      const html =
+          r'{"playable_url":"https:\/\/video.fbcdn.net\/sd.mp4?x=1","playable_url_quality_hd":"https:\/\/video.fbcdn.net\/hd.mp4?x=1\u0026y=2"}';
+      expect(DownloaderEngine.extractMp4FromHtml(html),
+          'https://video.fbcdn.net/hd.mp4?x=1&y=2');
+    });
+
+    test('extracts browser_native_hd_url when no playable_url', () {
+      const html =
+          r'{"browser_native_hd_url":"https:\/\/video.fbcdn.net\/native.mp4"}';
+      expect(DownloaderEngine.extractMp4FromHtml(html),
+          'https://video.fbcdn.net/native.mp4');
+    });
+
+    test('falls back to playable_url (sd) when no hd pattern', () {
+      const html =
+          r'{"playable_url":"https:\/\/video.fbcdn.net\/sd.mp4"}';
+      expect(DownloaderEngine.extractMp4FromHtml(html),
+          'https://video.fbcdn.net/sd.mp4');
     });
   });
 
@@ -235,6 +303,72 @@ group('tiktok download robustness (issue #12)', () {
       throwsA(isA<ResolveException>().having(
           (e) => e.message, 'message', contains('TikTok blocked'))),
     );
+    engine.dispose();
+  });
+});
+
+group('tiktok session cookies (issue #13)', () {
+  const pageHtml =
+      r'<html>"playAddr":"https:\/\/cdn.example.com\/vid1.mp4","other":"x"</html>';
+  const setCookie =
+      'ttwid=abc123; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, '
+      'tt_chain_token=xyz789; Path=/; HttpOnly, msToken=tok42; Path=/';
+
+  test('parseSetCookie splits combined header, ignores Expires commas',
+      () {
+    final parsed = DownloaderEngine.parseSetCookie(setCookie);
+    expect(parsed, {
+      'ttwid': 'abc123',
+      'tt_chain_token': 'xyz789',
+      'msToken': 'tok42',
+    });
+    expect(DownloaderEngine.parseSetCookie(null), isEmpty);
+    expect(DownloaderEngine.parseSetCookie(''), isEmpty);
+  });
+
+  test('file request carries the page session cookies', () async {
+    final sent = <http.BaseRequest>[];
+    final client = MockClient((req) async {
+      sent.add(req);
+      if (req.url.host.contains('tiktok.com')) {
+        return http.Response(pageHtml, 200,
+            headers: {'set-cookie': setCookie});
+      }
+      return http.Response('bytes', 200,
+          headers: {'content-type': 'video/mp4', 'content-length': '5'});
+    });
+    final engine = DownloaderEngine(client: client);
+    final direct = await engine.resolve('https://www.tiktok.com/t/abc/');
+    final dir = await Directory.systemTemp.createTemp('vb');
+    final saved = await engine.download(direct, dir.path);
+    expect(File(saved).existsSync(), isTrue);
+    final fileReq =
+        sent.firstWhere((r) => r.url.host.contains('cdn.example.com'));
+    expect(fileReq.headers['Cookie'], contains('ttwid=abc123'));
+    expect(fileReq.headers['Cookie'], contains('tt_chain_token=xyz789'));
+    engine.dispose();
+  });
+
+  test('akamai simulation: CDN 403s without cookie, serves with cookie',
+      () async {
+    final client = MockClient((req) async {
+      if (req.url.host.contains('tiktok.com')) {
+        return http.Response(pageHtml, 200,
+            headers: {'set-cookie': setCookie});
+      }
+      // Like Akamai: no session cookie -> Access Denied.
+      if ((req.headers['Cookie'] ?? '').contains('ttwid=abc123')) {
+        return http.Response('bytes', 200,
+            headers: {'content-type': 'video/mp4', 'content-length': '5'});
+      }
+      return http.Response('Access Denied', 403);
+    });
+    final engine = DownloaderEngine(client: client);
+    final direct = await engine.resolve('https://www.tiktok.com/t/abc/');
+    final dir = await Directory.systemTemp.createTemp('vb');
+    final saved = await engine.download(direct, dir.path);
+    expect(File(saved).existsSync(), isTrue);
+    expect(await File(saved).readAsString(), 'bytes');
     engine.dispose();
   });
 });
