@@ -23,6 +23,18 @@ class FbBrowserScreen extends StatefulWidget {
   final String pageUrl;
   const FbBrowserScreen({super.key, required this.pageUrl});
 
+  /// Facebook pages try to bounce mobile browsers into the Facebook app
+  /// via non-web schemes (`fb://…`, `intent://…`). A WebView cannot open
+  /// those and replaces the whole page with ERR_UNKNOWN_URL_SCHEME —
+  /// which destroyed the video page before extraction could run
+  /// (issue #18, device screenshot 2026-10-20). Only http/https
+  /// navigations may proceed. Public for tests.
+  static bool shouldBlockNavigation(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return true;
+    return uri.scheme != 'http' && uri.scheme != 'https';
+  }
+
   @override
   State<FbBrowserScreen> createState() => _FbBrowserScreenState();
 }
@@ -33,6 +45,8 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
   final _cookieManager = WebViewCookieManager();
 
   String? _videoUrl;
+  String _currentUrl = '';
+  String _fallbackForUrl = '';
   bool _downloading = false;
   bool _saved = false;
   double _progress = 0;
@@ -49,6 +63,17 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
           'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 '
           '(KHTML, like Gecko) Chrome/124.0 Mobile Safari/537.36')
       ..setNavigationDelegate(NavigationDelegate(
+        onNavigationRequest: (request) {
+          // Keep the WebView on the video page: block Facebook's
+          // app-deep-link bounces (fb://, intent://, …).
+          if (FbBrowserScreen.shouldBlockNavigation(request.url)) {
+            return NavigationDecision.prevent;
+          }
+          return NavigationDecision.navigate;
+        },
+        onUrlChange: (change) {
+          if (change.url != null) _currentUrl = change.url!;
+        },
         onPageFinished: (_) => _scheduleExtraction(),
       ))
       ..loadRequest(Uri.parse(widget.pageUrl));
@@ -91,6 +116,30 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
       }
     } catch (_) {
       // Page still settling; retry below.
+    }
+    // Fallback: once the browser has resolved the share link to the real
+    // video page, the engine's HTTP path (3 page variants incl. desktop
+    // UA) plus this session's cookies may expose the file even when the
+    // WebView's own HTML does not.
+    if (_fallbackForUrl != _currentUrl &&
+        _currentUrl.contains('facebook.com') &&
+        !DownloaderEngine.isFacebookShareLink(_currentUrl)) {
+      _fallbackForUrl = _currentUrl;
+      try {
+        final cookies = await _cookieManager.getCookies(
+            domain: Uri.parse(_currentUrl));
+        _engine.setExternalCookies(LinkKind.facebook,
+            {for (final c in cookies) c.name: c.value});
+        final direct = await _engine.resolve(_currentUrl);
+        if (!mounted) return;
+        setState(() {
+          _videoUrl = direct;
+          _status = 'Video found — tap Download.';
+        });
+        return;
+      } catch (_) {
+        // HTTP path blocked too; keep retrying page extraction.
+      }
     }
     if (_extractAttempts < 8) {
       _extractTimer = Timer(const Duration(seconds: 2), _tryExtract);

@@ -5,6 +5,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:vid_baaz/downloader/downloader_engine.dart';
 import 'package:vid_baaz/downloader/link_classifier.dart';
+import 'package:vid_baaz/ui/fb_browser_screen.dart';
 
 void main() {
   final classifier = LinkClassifier();
@@ -105,6 +106,25 @@ void main() {
             (e) => e.message, 'message', contains('in-app browser'))),
       );
       engine.dispose();
+    });
+
+    test('browser blocks app deep-link schemes (issue #18)', () {
+      expect(
+          FbBrowserScreen.shouldBlockNavigation(
+              'fb://fullscreen_video/2602442030183424?loop=false'),
+          isTrue);
+      expect(
+          FbBrowserScreen.shouldBlockNavigation(
+              'intent://www.facebook.com/reel/1#Intent;scheme=https;end'),
+          isTrue);
+      expect(
+          FbBrowserScreen.shouldBlockNavigation(
+              'https://www.facebook.com/reel/2602442030183424'),
+          isFalse);
+      expect(
+          FbBrowserScreen.shouldBlockNavigation(
+              'http://m.facebook.com/watch/?v=1'),
+          isFalse);
     });
 
     test('isFacebookShareLink detects share urls (issue #15)', () {
