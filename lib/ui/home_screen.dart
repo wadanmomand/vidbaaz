@@ -59,7 +59,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ? null
           : AppBar(
               title: const Text(
-                'VIDBAAZ: VIDEO DOWNLOADER',
+                'VIDBAAZ',
                 style: TextStyle(
                     fontWeight: FontWeight.bold, letterSpacing: 1.2),
               ),

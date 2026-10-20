@@ -10,9 +10,10 @@
     <!-- Video downloads. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <application
-        android:label="VidBaaz: Video Downloader"
+        android:label="VidBaaz"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
             android:exported="true"
