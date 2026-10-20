@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -159,4 +161,82 @@ void main() {
       expect(DownloaderEngine.extractMp4FromHtml('<html>nope</html>'), isNull);
     });
   });
+
+group('tiktok download robustness (issue #12)', () {
+  const pageHtml =
+      r'<html>"playAddr":"https:\/\/cdn.example.com\/vid1.mp4","other":"x"</html>';
+
+  test('file request carries Referer for tiktok and succeeds', () async {
+    final sent = <http.BaseRequest>[];
+    final client = MockClient((req) async {
+      sent.add(req);
+      if (req.url.host.contains('tiktok.com')) {
+        return http.Response(pageHtml, 200);
+      }
+      return http.Response('bytes', 200,
+          headers: {'content-type': 'video/mp4', 'content-length': '5'});
+    });
+    final engine = DownloaderEngine(client: client);
+    final direct = await engine.resolve('https://www.tiktok.com/t/abc/');
+    expect(direct, 'https://cdn.example.com/vid1.mp4');
+    final dir = await Directory.systemTemp.createTemp('vb');
+    final saved = await engine.download(direct, dir.path);
+    expect(File(saved).existsSync(), isTrue);
+    final fileReq = sent.firstWhere(
+        (r) => r.url.host.contains('cdn.example.com'));
+    expect(fileReq.headers['Referer'], 'https://www.tiktok.com/');
+    engine.dispose();
+  });
+
+  test('403 on file -> re-resolves once and retries with fresh URL', () async {
+    var pageHits = 0;
+    final fileHits = <String>[];
+    final client = MockClient((req) async {
+      if (req.url.host.contains('tiktok.com')) {
+        pageHits++;
+        final url = pageHits == 1
+            ? 'https://cdn.example.com/old.mp4'
+            : 'https://cdn.example.com/new.mp4';
+        return http.Response(
+            '<html>"playAddr":"${url.replaceAll('/', r'\/')}","x":"y"</html>',
+            200);
+      }
+      fileHits.add(req.url.toString());
+      if (req.url.toString().contains('old.mp4')) {
+        return http.Response('denied', 403);
+      }
+      return http.Response('bytes', 200,
+          headers: {'content-type': 'video/mp4', 'content-length': '5'});
+    });
+    final engine = DownloaderEngine(client: client);
+    final direct = await engine.resolve('https://www.tiktok.com/t/abc/');
+    expect(direct, contains('old.mp4'));
+    final dir = await Directory.systemTemp.createTemp('vb');
+    final saved = await engine.download(direct, dir.path);
+    expect(File(saved).existsSync(), isTrue);
+    expect(fileHits, ['https://cdn.example.com/old.mp4',
+      'https://cdn.example.com/new.mp4']);
+    expect(pageHits, 2); // initial resolve + one re-resolve
+    engine.dispose();
+  });
+
+  test('persistent 403 gives friendly tiktok message', () async {
+    final client = MockClient((req) async {
+      if (req.url.host.contains('tiktok.com')) {
+        return http.Response(pageHtml, 200);
+      }
+      return http.Response('denied', 403);
+    });
+    final engine = DownloaderEngine(client: client);
+    final direct = await engine.resolve('https://www.tiktok.com/t/abc/');
+    final dir = await Directory.systemTemp.createTemp('vb');
+    expect(
+      () => engine.download(direct, dir.path),
+      throwsA(isA<ResolveException>().having(
+          (e) => e.message, 'message', contains('TikTok blocked'))),
+    );
+    engine.dispose();
+  });
+});
+
 }

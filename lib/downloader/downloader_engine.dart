@@ -31,10 +31,16 @@ class DownloaderEngine {
 
   LinkKind _lastKind = LinkKind.directMedia;
 
+  /// The normalized page URL from the last successful resolve — used to
+  /// re-resolve once if a download gets rejected (TikTok play URLs can
+  /// expire or be region-pinned).
+  String? _lastPageUrl;
+
   /// Resolves a pasted link to a direct MP4 URL (or throws [ResolveException]).
   Future<String> resolve(String rawLink) async {
     final link = LinkClassifier().classify(rawLink);
     _lastKind = link.kind;
+    _lastPageUrl = link.kind == LinkKind.tiktok ? link.url : null;
     switch (link.kind) {
       case LinkKind.unsupported:
         throw ResolveException(link.reason);
@@ -180,6 +186,26 @@ class DownloaderEngine {
     return null;
   }
 
+  /// Headers for the video file request. TikTok's CDN rejects requests
+  /// without the Referer (HTTP 403), so it is always sent for TikTok.
+  Map<String, String> _fileHeaders() {
+    final h = <String, String>{
+      'User-Agent': _ua,
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+    };
+    if (_lastKind == LinkKind.tiktok) {
+      h['Referer'] = 'https://www.tiktok.com/';
+    }
+    return h;
+  }
+
+  Future<http.StreamedResponse> _sendFileRequest(String mediaUrl) {
+    final req = http.Request('GET', Uri.parse(mediaUrl))
+      ..headers.addAll(_fileHeaders());
+    return _client.send(req).timeout(const Duration(seconds: 30));
+  }
+
   /// Downloads [mediaUrl] into [saveDir], reporting 0..1 progress.
   /// Returns the saved file path.
   Future<String> download(
@@ -199,14 +225,25 @@ class DownloaderEngine {
           '${dir.path}/${DateTime.now().millisecondsSinceEpoch}_${target.split('/').last}';
     }
 
-    final req = http.Request('GET', uri)
-      ..headers['User-Agent'] = _ua;
-    // TikTok's CDN checks the referer on video file requests.
-    if (_lastKind == LinkKind.tiktok) {
-      req.headers['Referer'] = 'https://www.tiktok.com/';
+    var streamed = await _sendFileRequest(mediaUrl);
+    if ((streamed.statusCode == 401 || streamed.statusCode == 403) &&
+        _lastKind == LinkKind.tiktok &&
+        _lastPageUrl != null) {
+      // The play URL was rejected — these URLs expire and can be
+      // region-pinned. Re-resolve once for a fresh URL and retry.
+      try {
+        final fresh = await resolve(_lastPageUrl!);
+        streamed = await _sendFileRequest(fresh);
+      } on ResolveException {
+        // Keep the original 403 response handling below.
+      }
     }
-    final streamed = await _client.send(req).timeout(const Duration(seconds: 30));
     if (streamed.statusCode != 200) {
+      if (_lastKind == LinkKind.tiktok) {
+        throw ResolveException(
+            'TikTok blocked this download right now. Wait a minute and try '
+            'again — or copy the link from inside the TikTok app.');
+      }
       throw ResolveException('Download failed (HTTP ${streamed.statusCode}).');
     }
     final total = streamed.contentLength ?? -1;

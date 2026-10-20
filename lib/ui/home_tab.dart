@@ -19,7 +19,7 @@ class _HomeTabState extends State<HomeTab> {
   ImageStreamListener? _listener;
   Size? _artSize; // intrinsic size of home-final.png
 
-  static const _artAspect = 1152 / 2048;
+  static const _artAspect = 1080 / 1920;
 
   @override
   void didChangeDependencies() {
@@ -79,7 +79,17 @@ class _HomeTabState extends State<HomeTab> {
         }
 
         return Container(
-          color: const Color(0xFF0D1330),
+          // The art's own edge colors (sampled from the PNG: top #08112c,
+          // bottom #111a57) as a vertical gradient so the letterbox bands
+          // above/below the contained art blend in seamlessly on tall
+          // phones instead of showing as dark bars.
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xFF08112C), Color(0xFF111A57)],
+            ),
+          ),
           alignment: Alignment.center,
           child: SizedBox(
             width: iw,

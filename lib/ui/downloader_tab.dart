@@ -3,6 +3,7 @@ library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../downloader/downloader_engine.dart';
 
@@ -21,6 +22,10 @@ class _DownloaderTabState extends State<DownloaderTab> {
   _DlState _state = _DlState.idle;
   double _progress = 0;
   String _message = '';
+
+  /// The pasted link, kept when it is a Facebook share link so the user
+  /// can open it in the Facebook app and copy the full video link.
+  String? _shareLink;
 
   @override
   void dispose() {
@@ -75,6 +80,10 @@ class _DownloaderTabState extends State<DownloaderTab> {
       setState(() {
         _state = _DlState.error;
         _message = e.message;
+        // Facebook share links can't be resolved by any app — keep the
+        // link so we can offer "Open in Facebook app".
+        _shareLink =
+            e.message.contains('share link') ? _controller.text.trim() : null;
       });
     } catch (_) {
       if (!mounted) return;
@@ -158,6 +167,22 @@ class _DownloaderTabState extends State<DownloaderTab> {
                 style: const TextStyle(height: 1.4),
               ),
             ),
+          if (_shareLink != null && _state == _DlState.error) ...[
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: () async {
+                final uri = Uri.tryParse(_shareLink!);
+                if (uri != null) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              icon: const Icon(Icons.open_in_new),
+              label: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 10),
+                child: Text('Open in Facebook app'),
+              ),
+            ),
+          ],
           if (_state == _DlState.done) ...[
             const SizedBox(height: 8),
             TextButton.icon(
