@@ -51,6 +51,16 @@ android {
 
     buildTypes {
         release {
+            // Crash-safe release config (standing rule): the Google
+            // Mobile Ads SDK pulls WorkManager + Room transitively, and
+            // R8 shrinking strips Room's generated classes -> startup
+            // crash. Shrinking stays OFF; keep rules are wired anyway.
+            isMinifyEnabled = false
+            isShrinkResources = false
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             // Signed with the upload keystore from key.properties when it
             // exists; falls back to debug keys so local --release runs
             // still work on machines without the keystore.

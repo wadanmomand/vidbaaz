@@ -4,6 +4,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../ads/ad_banner.dart';
 import 'disclaimer.dart';
 import 'downloader_tab.dart';
 import 'home_tab.dart';
@@ -75,30 +76,38 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
       bottomNavigationBar: onHome
           ? null
-          : BottomNavigationBar(
-              currentIndex: _index,
-              onTap: _goTo,
-              type: BottomNavigationBarType.fixed,
-              items: const [
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.home_outlined),
-                  activeIcon: Icon(Icons.home),
-                  label: 'Home',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.photo_library_outlined),
-                  activeIcon: Icon(Icons.photo_library),
-                  label: 'Status',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.cloud_download_outlined),
-                  activeIcon: Icon(Icons.cloud_download),
-                  label: 'Download',
-                ),
-                BottomNavigationBarItem(
-                  icon: Icon(Icons.folder_outlined),
-                  activeIcon: Icon(Icons.folder),
-                  label: 'Saved',
+          // Banner sits above the nav (never over the full-bleed home
+          // art, which stays untouched). Hidden until an ad loads.
+          : Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const AdBanner(),
+                BottomNavigationBar(
+                  currentIndex: _index,
+                  onTap: _goTo,
+                  type: BottomNavigationBarType.fixed,
+                  items: const [
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.home_outlined),
+                      activeIcon: Icon(Icons.home),
+                      label: 'Home',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.photo_library_outlined),
+                      activeIcon: Icon(Icons.photo_library),
+                      label: 'Status',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.cloud_download_outlined),
+                      activeIcon: Icon(Icons.cloud_download),
+                      label: 'Download',
+                    ),
+                    BottomNavigationBarItem(
+                      icon: Icon(Icons.folder_outlined),
+                      activeIcon: Icon(Icons.folder),
+                      label: 'Saved',
+                    ),
+                  ],
                 ),
               ],
             ),

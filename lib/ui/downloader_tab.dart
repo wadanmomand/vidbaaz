@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../downloader/downloader_engine.dart';
 import '../downloader/link_classifier.dart';
+import '../media/media_scan.dart';
 import 'fb_browser_screen.dart';
 
 enum _DlState { idle, resolving, downloading, done, error }
@@ -86,6 +87,9 @@ class _DownloaderTabState extends State<DownloaderTab> {
           if (mounted) setState(() => _progress = p);
         },
       );
+      // Issue #26: scan the file so Gallery apps see it at once
+      // (without this, only the in-app Saved tab lists it).
+      await MediaScan.scanFile(saved);
       if (!mounted) return;
       setState(() {
         _state = _DlState.done;

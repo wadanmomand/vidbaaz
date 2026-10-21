@@ -1,9 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import 'ui/home_screen.dart';
 import 'ui/theme.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  // Ads are best-effort only: a failure here must never block the app.
+  try {
+    await MobileAds.instance.initialize();
+  } catch (_) {
+    // Ignore — the banner simply stays hidden.
+  }
   runApp(const VidBaazApp());
 }
 

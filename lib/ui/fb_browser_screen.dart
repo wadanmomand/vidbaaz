@@ -18,6 +18,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../downloader/downloader_engine.dart';
 import '../downloader/link_classifier.dart';
+import '../media/media_scan.dart';
 
 class FbBrowserScreen extends StatefulWidget {
   final String pageUrl;
@@ -35,6 +36,27 @@ class FbBrowserScreen extends StatefulWidget {
     return uri.scheme != 'http' && uri.scheme != 'https';
   }
 
+  /// Facebook sometimes answers a video with a full login page instead
+  /// of the video (issue #25). That is NOT a closable popup: the whole
+  /// page redirects to login, so there is no X and no file will ever
+  /// appear behind it. Detect it so the UI can say so honestly instead
+  /// of looping "file not found, tap Retry". Public for tests.
+  static bool isFacebookLoginUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return false;
+    final host = uri.host.toLowerCase();
+    if (host != 'facebook.com' &&
+        !host.endsWith('.facebook.com') &&
+        host != 'm.facebook.com') {
+      return false;
+    }
+    final path = uri.path.toLowerCase();
+    return path == '/login' ||
+        path.startsWith('/login/') ||
+        path.contains('login.php') ||
+        path.startsWith('/checkpoint/');
+  }
+
   @override
   State<FbBrowserScreen> createState() => _FbBrowserScreenState();
 }
@@ -49,6 +71,7 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
   String _fallbackForUrl = '';
   bool _downloading = false;
   bool _saved = false;
+  bool _loginWall = false;
   double _progress = 0;
   String _status = 'Loading the Facebook page…';
   int _extractAttempts = 0;
@@ -72,7 +95,22 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
           return NavigationDecision.navigate;
         },
         onUrlChange: (change) {
-          if (change.url != null) _currentUrl = change.url!;
+          if (change.url != null) {
+            _currentUrl = change.url!;
+            // A login redirect kills extraction: stop retrying and say
+            // so instead of the misleading "file not found, tap Retry".
+            final wall =
+                FbBrowserScreen.isFacebookLoginUrl(change.url!);
+            if (wall && !_loginWall) {
+              _extractTimer?.cancel();
+              setState(() {
+                _loginWall = true;
+                _status = 'This video is behind a Facebook login wall, '
+                    'so it cannot be downloaded without logging in. '
+                    'VidBaaz never asks for your login.';
+              });
+            }
+          }
         },
         onPageFinished: (_) => _scheduleExtraction(),
       ))
@@ -89,13 +127,13 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
   /// The video URL can appear a moment after the page "finishes" (the
   /// player payload renders late), so extraction retries a few times.
   void _scheduleExtraction() {
-    if (_videoUrl != null) return;
+    if (_videoUrl != null || _loginWall) return;
     _extractTimer?.cancel();
     _extractTimer = Timer(const Duration(milliseconds: 800), _tryExtract);
   }
 
   Future<void> _tryExtract() async {
-    if (!mounted || _videoUrl != null) return;
+    if (!mounted || _videoUrl != null || _loginWall) return;
     _extractAttempts++;
     try {
       final raw = await _controller
@@ -171,6 +209,10 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
           if (mounted) setState(() => _progress = p);
         },
       );
+      // Issue #26: tell Android's media scanner about the file, or
+      // Gallery never sees it (Saved tab reads the folder directly,
+      // Gallery reads MediaStore).
+      await MediaScan.scanFile(saved);
       if (!mounted) return;
       setState(() {
         _downloading = false;
@@ -204,6 +246,8 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
             tooltip: 'Reload page',
             onPressed: () {
               _extractAttempts = 0;
+              _loginWall = false;
+              _status = 'Loading the Facebook page…';
               _controller.reload();
             },
           ),
@@ -215,10 +259,14 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
             width: double.infinity,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
             color: Colors.amber.shade100,
-            child: const Text(
-              'Let the video load. If a Facebook login popup appears, '
-              'just close it (tap X) — no login is needed.',
-              style: TextStyle(color: Colors.black87, fontSize: 13),
+            child: Text(
+              _loginWall
+                  ? 'This video needs a Facebook login to view. '
+                      'VidBaaz never asks you to log in — please try '
+                      'a different video.'
+                  : 'Let the video load. If a Facebook login popup appears, '
+                      'just close it (tap X) — no login is needed.',
+              style: const TextStyle(color: Colors.black87, fontSize: 13),
             ),
           ),
           Expanded(child: WebViewWidget(controller: _controller)),
@@ -259,7 +307,7 @@ class _FbBrowserScreenState extends State<FbBrowserScreen> {
                           ),
                         ),
                       ),
-                      if (_videoUrl == null) ...[
+                      if (_videoUrl == null && !_loginWall) ...[
                         const SizedBox(width: 8),
                         OutlinedButton(
                           onPressed: () {
